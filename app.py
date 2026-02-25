@@ -1,6 +1,5 @@
-# gate_deep_js_server.py
-# Versão adaptada para servidor - logs vão para o grupo Telegram
-# Versão completa com todas as funções integradas
+# bot_gate.py - Versão FINAL corrigida para rodar local e em container/Railway
+# Correções: indentação, screenshot logs sem bot, startup log via post_init
 
 import os
 import re
@@ -9,7 +8,8 @@ import html
 import datetime
 import asyncio
 import httpx
-from dataclasses import dataclass, asdict
+import csv
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Callable
 from urllib.parse import urljoin, urlparse
 
@@ -23,8 +23,8 @@ from playwright.async_api import async_playwright, Browser, Page
 # =============================
 # Configuração principal
 # =============================
-TOKEN = "8768731529:AAFO9hgrYtVCpKmqDwwu8RI4weBkJ02uJXs"  # ← substitua aqui pelo token real do bot
-GROUP_ID = -5293701786                     # Grupo que recebe os logs
+TOKEN = "8768731529:AAFO9hgrYtVCpKmqDwwu8RI4weBkJ02uJXs"  # ← SUBSTITUA PELO TOKEN REAL DO SEU BOT
+GROUP_ID = -5293701786                     # ID do seu grupo para logs
 
 MAX_BYTES = 2_000_000
 MAX_SITES_PER_BATCH = 200
@@ -64,7 +64,7 @@ def ce(num: str) -> Optional[str]:
     return PREMIUM_EMOJIS.get(str(num))
 
 # =============================
-# HTML emoji helpers
+# Helpers Telegram
 # =============================
 def tg_emoji(emoji_id: Optional[str], fallback: str) -> str:
     if not emoji_id:
@@ -84,12 +84,12 @@ async def edit_lines(msg: Message, lines: List[Tuple[Optional[str], str, str]]):
     await msg.edit_text(build_lines_html(lines), parse_mode="HTML")
 
 # =============================
-# Envio simplificado de logs para o grupo
+# Envio de log para grupo
 # =============================
-async def send_log_to_group(context: ContextTypes.DEFAULT_TYPE, text: str):
+async def send_log_to_group(bot, text: str):
     try:
         prefix = f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=GROUP_ID,
             text=prefix + text,
             disable_notification=True,
@@ -99,7 +99,7 @@ async def send_log_to_group(context: ContextTypes.DEFAULT_TYPE, text: str):
         print(f"ERRO AO ENVIAR LOG PARA O GRUPO: {e}")
 
 # =============================
-# Pretty Result Renderer
+# Renderização bonita do resultado
 # =============================
 def esc(s: str) -> str:
     return html.escape(s or "")
@@ -184,27 +184,25 @@ def render_pretty_result(res: "ScanResult") -> str:
     return "\n".join(lines)
 
 # =============================
-# /start
+# Comando /start
 # =============================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     username = u.username or u.first_name or "desconhecido"
-    await send_log_to_group(context, f"Usuário <b>{username}</b> (ID {u.id}) iniciou o bot com /start")
+    await send_log_to_group(context.bot, f"Usuário <b>{username}</b> (ID {u.id}) iniciou o bot com /start")
 
     sep = "━━━━━━━━━━━━━━━━━━"
     text = "\n".join([
         f'{tg_emoji(ce("1"), "🌐")} <b>Epstein Hints Checker</b>',
         f'{tg_emoji(ce("9"), "✍️")} <i>Justice for Epstein!!!</i>',
         sep,
-
         f'{tg_emoji(ce("10"), "🚀")} <b>SCAN</b>',
         f'{tg_emoji(ce("11"), "🔍")} <code>/check &lt;site&gt;</code>  — fast',
         f'{tg_emoji(ce("11"), "🔍")} <code>/checkjs &lt;site&gt;</code> — deep',
         "",
-
         f'{tg_emoji(ce("12"), "🗂")} <b>BATCH</b>',
-        f'{tg_emoji(ce("12"), "🗂")} Send .txt (1 domain/line, max {MAX_SITES_PER_BATCH})',
-        f'{tg_emoji(ce("8"), "📊")} /csv — last batch report',
+        f'{tg_emoji(ce("12"), "🗂")} Envie .txt (1 domínio por linha, máx {MAX_SITES_PER_BATCH})',
+        f'{tg_emoji(ce("8"), "📊")} /csv — relatório do último batch',
         sep,
         f'{tg_emoji(ce("5"), "🛡")} <b>WHAT IT DETECTS</b>',
         f'{tg_emoji(ce("4"), "⛈")} Cloudflare/WAF',
@@ -216,7 +214,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(text, parse_mode="HTML")
 
 # =============================
-# Helpers
+# Helpers utilitários
 # =============================
 def normalize_url(url: str) -> str:
     url = (url or "").strip()
@@ -251,7 +249,7 @@ def root_domain(host: str) -> str:
     return ".".join(parts[-2:])
 
 # =============================
-# Discovery
+# Keywords e Patterns (parte grande)
 # =============================
 SCRIPT_PAYMENT_KEYWORDS = re.compile(
     r"(pay|payment|checkout|billing|card|cc-|gateway|processor|3ds|secure|token|vault|"
@@ -297,9 +295,6 @@ def summarize_external_domains(urls: List[str], base_root: str, only_payment_lik
             hits.append(rd)
     return sorted(set(hits))[:20]
 
-# =============================
-# Patterns
-# =============================
 AMEX_PATTERNS = [
     r"\bamerican\s*express\b",
     r"\bamex\b",
@@ -497,7 +492,9 @@ GATEWAY_HINTS = {}
 GATEWAY_HINTS.update(STRONG_GATEWAY_HINTS)
 GATEWAY_HINTS.update(build_weak_gateway_hints(WEAK_GATEWAY_KEYWORDS, weight=2))
 
-# Result struct
+# =============================
+# Estrutura de resultado
+# =============================
 @dataclass
 class ScanResult:
     url: str
@@ -518,7 +515,9 @@ class ScanResult:
     screenshot_bytes: Optional[bytes] = None
     screenshot_taken_from: Optional[str] = None
 
-# HTTP client
+# =============================
+# Cliente HTTP global
+# =============================
 HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _HTTP_LOCK = asyncio.Lock()
 
@@ -534,7 +533,9 @@ async def get_http_client() -> httpx.AsyncClient:
             )
         return HTTP_CLIENT
 
-# Playwright
+# =============================
+# Playwright global
+# =============================
 PW_LOCK = asyncio.Lock()
 PW = None
 PW_BROWSER: Optional[Browser] = None
@@ -557,7 +558,9 @@ async def shutdown_playwright():
             await PW.stop()
             PW = None
 
-# Fetchers
+# =============================
+# Funções de fetch
+# =============================
 async def fetch_public_async(url: str) -> Tuple[str, str, str, int, str, str]:
     try:
         client = await get_http_client()
@@ -590,7 +593,9 @@ async def fetch_rendered_html(url: str, max_wait_ms: int = 12000) -> Tuple[str, 
     except Exception as e:
         return "", [], str(e)[:160]
 
-# Detectors
+# =============================
+# Detectores
+# =============================
 def detect_cloudflare(html_txt: str, headers_joined: str, cookie_names: str, status_code: int) -> Tuple[bool, bool, int]:
     score = 0
     cf = False
@@ -656,7 +661,9 @@ def detect_external_domains(html_txt: str) -> Tuple[List[str], int]:
             score += sc
     return sorted(set(found)), min(12, score)
 
-# Scan engine
+# =============================
+# Motor de scan - CORRIGIDO
+# =============================
 async def scan_one_site(
     raw_url: str,
     use_js: bool = False,
@@ -834,7 +841,7 @@ async def scan_one_site(
 
             await analyze_blob(curr_base, r_html, "", "", 200, url)
 
-            # Screenshot
+            # Screenshot - CORRIGIDO: sem bot, apenas print
             if screenshot_bytes is None and path in ["/checkout", "/cart", "/"]:
                 try:
                     browser = await get_browser()
@@ -849,10 +856,10 @@ async def scan_one_site(
                         timeout=15000
                     )
                     screenshot_taken_from = path
-                    await send_log_to_group(context=None, text=f"Screenshot capturado de {path} - tamanho: {len(screenshot_bytes)/1024/1024:.2f} MB")  # Log de debug
+                    print(f"[DEBUG] Screenshot capturado de {path} - tamanho: {len(screenshot_bytes)/1024/1024:.2f} MB")
                     await ctx.close()
                 except Exception as e:
-                    await send_log_to_group(context=None, text=f"Erro screenshot {path}: {e}")
+                    print(f"[DEBUG] Erro ao capturar screenshot de {path}: {e}")
 
         return screenshot_bytes, screenshot_taken_from
 
@@ -910,7 +917,7 @@ async def scan_one_site(
     )
 
 # =============================
-# Envio com screenshot (versão robusta)
+# Envio do resultado com screenshot
 # =============================
 async def send_result_with_screenshot(update: Update, res: ScanResult, progress_msg: Message):
     text = render_pretty_result(res)
@@ -920,7 +927,6 @@ async def send_result_with_screenshot(update: Update, res: ScanResult, progress_
             bio = io.BytesIO(res.screenshot_bytes)
             bio.name = f"screenshot_{res.screenshot_taken_from or 'page'}.jpg"
 
-            # Envia a imagem
             if len(res.screenshot_bytes) > 8_000_000:
                 await update.effective_message.reply_document(
                     document=InputFile(bio),
@@ -934,34 +940,32 @@ async def send_result_with_screenshot(update: Update, res: ScanResult, progress_
                     parse_mode="HTML"
                 )
 
-            # Deleta a mensagem de progresso após envio
             try:
                 await progress_msg.delete()
             except Exception as del_err:
-                await send_log_to_group(context=None, text=f"Erro ao deletar progresso após envio: {del_err}")
+                await send_log_to_group(update.effective_chat.bot, f"Erro ao deletar progresso após envio: {del_err}")
             return
         except TimedOut as to_err:
-            await send_log_to_group(context=None, text=f"Timeout no envio da screenshot: {to_err}")
+            await send_log_to_group(update.effective_chat.bot, f"Timeout no envio da screenshot: {to_err}")
             text += "\n\n<i>Timeout ao enviar screenshot (rede lenta ou limite do Telegram)</i>"
         except Exception as e:
-            await send_log_to_group(context=None, text=f"Erro ao enviar screenshot: {e}")
+            await send_log_to_group(update.effective_chat.bot, f"Erro ao enviar screenshot: {e}")
             text += f"\n\n<i>Erro ao enviar screenshot: {str(e)[:80]}</i>"
 
-    # Fallback: edita a mensagem original
     try:
         await progress_msg.edit_text(text, parse_mode="HTML")
     except BadRequest as br_err:
         if "Message to edit not found" in str(br_err):
-            await send_log_to_group(context=None, text="Mensagem de progresso não encontrada - enviando nova")
+            await send_log_to_group(update.effective_chat.bot, "Mensagem de progresso não encontrada - enviando nova")
             await update.effective_message.reply_text(text, parse_mode="HTML")
         else:
-            await send_log_to_group(context=None, text=f"Erro no fallback edit: {br_err}")
+            await send_log_to_group(update.effective_chat.bot, f"Erro no fallback edit: {br_err}")
     except Exception as e:
-        await send_log_to_group(context=None, text=f"Erro no fallback: {e}")
+        await send_log_to_group(update.effective_chat.bot, f"Erro no fallback: {e}")
         await update.effective_message.reply_text(text, parse_mode="HTML")
 
 # =============================
-# Comandos
+# Comandos /check e /checkjs
 # =============================
 _last_batch_results: Dict[int, List[ScanResult]] = {}
 
@@ -973,7 +977,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target = context.args[0]
-    await send_log_to_group(context, f"<b>{username}</b> (ID {u.id}) → /check <code>{target}</code>")
+    await send_log_to_group(context.bot, f"<b>{username}</b> (ID {u.id}) → /check <code>{target}</code>")
 
     progress_msg = await send_lines(update, [(ce("11"), "🔍", "Checking…")])
     last_edit = 0.0
@@ -988,10 +992,9 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await scan_one_site(target, use_js=False, progress_callback=progress_callback)
     await send_result_with_screenshot(update, res, progress_msg)
 
-    # Log do resultado no grupo
     conf = res.confidence.upper()
     score = res.score
-    await send_log_to_group(context, f"Resultado /check <code>{target}</code> → Confidence: <b>{conf}</b> | Score: {score} | CF: {yn(res.cloudflare)} | Pagamentos: {res.payment_hints[:80]}{'...' if len(res.payment_hints)>80 else ''}")
+    await send_log_to_group(context.bot, f"Resultado /check <code>{target}</code> → Confidence: <b>{conf}</b> | Score: {score} | CF: {yn(res.cloudflare)} | Pagamentos: {res.payment_hints[:80]}{'...' if len(res.payment_hints)>80 else ''}")
 
 async def cmd_checkjs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -1001,7 +1004,7 @@ async def cmd_checkjs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target = context.args[0]
-    await send_log_to_group(context, f"<b>{username}</b> (ID {u.id}) → /checkjs <code>{target}</code>")
+    await send_log_to_group(context.bot, f"<b>{username}</b> (ID {u.id}) → /checkjs <code>{target}</code>")
 
     progress_msg = await send_lines(update, [(ce("11"), "🔍", "Starting deep JS scan…")])
     last_edit = 0.0
@@ -1016,10 +1019,9 @@ async def cmd_checkjs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await scan_one_site(target, use_js=True, progress_callback=progress_callback)
     await send_result_with_screenshot(update, res, progress_msg)
 
-    # Log do resultado no grupo
     conf = res.confidence.upper()
     score = res.score
-    await send_log_to_group(context, f"Resultado /checkjs <code>{target}</code> → Confidence: <b>{conf}</b> | Score: {score} | CF: {yn(res.cloudflare)} | Pagamentos: {res.payment_hints[:80]}{'...' if len(res.payment_hints)>80 else ''}")
+    await send_log_to_group(context.bot, f"Resultado /checkjs <code>{target}</code> → Confidence: <b>{conf}</b> | Score: {score} | CF: {yn(res.cloudflare)} | Pagamentos: {res.payment_hints[:80]}{'...' if len(res.payment_hints)>80 else ''}")
 
 def results_to_csv_bytes(results: List[ScanResult]) -> bytes:
     bio = io.BytesIO()
@@ -1032,7 +1034,7 @@ def results_to_csv_bytes(results: List[ScanResult]) -> bytes:
 async def cmd_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     username = u.username or u.first_name or "desconhecido"
-    await send_log_to_group(context, f"<b>{username}</b> (ID {u.id}) → /csv")
+    await send_log_to_group(context.bot, f"<b>{username}</b> (ID {u.id}) → /csv")
 
     chat_id = update.effective_chat.id
     results = _last_batch_results.get(chat_id)
@@ -1080,7 +1082,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_lines(update, [(ce("12"), "🗂", "File too large. Keep under 1MB.")])
         return
 
-    await send_log_to_group(context, f"<b>{username}</b> (ID {u.id}) enviou arquivo batch: <code>{filename}</code> ({doc.file_size or '?'} bytes)")
+    await send_log_to_group(context.bot, f"<b>{username}</b> (ID {u.id}) enviou arquivo batch: <code>{filename}</code> ({doc.file_size or '?'} bytes)")
 
     progress_msg = await send_lines(update, [(ce("10"), "🚀", "Batch: starting…")])
 
@@ -1130,7 +1132,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (ce("12"), "🗂", "Use /csv to download the report."),
     ])
 
-    await send_log_to_group(context, f"Batch concluído ({len(results)} sites) por <b>{username}</b>\n→ High: {high} | Medium: {med} | Low: {low}")
+    await send_log_to_group(context.bot, f"Batch concluído ({len(results)} sites) por <b>{username}</b>\n→ High: {high} | Medium: {med} | Low: {low}")
 
 # =============================
 # Shutdown
@@ -1143,7 +1145,16 @@ async def _post_shutdown(app: Application):
     await shutdown_playwright()
 
 # =============================
-# Main
+# Log inicial no grupo
+# =============================
+async def post_init(application: Application) -> None:
+    try:
+        await send_log_to_group(application.bot, "🤖 Bot iniciado no servidor (Railway/Container)")
+    except Exception as e:
+        print(f"Erro no post_init log: {e}")
+
+# =============================
+# Main - indentação perfeita
 # =============================
 def main():
     if not TOKEN or TOKEN == "SEU_TOKEN_AQUI_DIRETO_NO_CODIGO":
@@ -1155,6 +1166,7 @@ def main():
     app = Application.builder() \
         .token(TOKEN) \
         .concurrent_updates(CONCURRENT_UPDATES) \
+        .post_init(post_init) \
         .post_shutdown(_post_shutdown) \
         .build()
 
@@ -1163,13 +1175,6 @@ def main():
     app.add_handler(CommandHandler("checkjs", cmd_checkjs))
     app.add_handler(CommandHandler("csv", cmd_csv))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-
-    # Log inicial no grupo
-    async def init_log():
-        context = ContextTypes.DEFAULT_TYPE(bot=app.bot)
-        await send_log_to_group(context, "🤖 Bot iniciado no servidor")
-
-    asyncio.get_event_loop().run_until_complete(init_log())
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
