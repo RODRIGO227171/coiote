@@ -201,8 +201,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'{tg_emoji(ce("11"), "🔍")} <code>/checkjs &lt;site&gt;</code> — deep',
         "",
         f'{tg_emoji(ce("12"), "🗂")} <b>BATCH</b>',
-        f'{tg_emoji(ce("12"), "🗂")} Envie .txt (1 domínio por linha, máx {MAX_SITES_PER_BATCH})',
-        f'{tg_emoji(ce("8"), "📊")} /csv — relatório do último batch',
+        f'{tg_emoji(ce("12"), "🗂")} Send a .txt file (1 domain per line, max {MAX_SITES_PER_BATCH})',
+        f'{tg_emoji(ce("8"), "📊")} /csv — Last batch report',
         sep,
         f'{tg_emoji(ce("5"), "🛡")} <b>WHAT IT DETECTS</b>',
         f'{tg_emoji(ce("4"), "⛈")} Cloudflare/WAF',
@@ -1180,3 +1180,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
