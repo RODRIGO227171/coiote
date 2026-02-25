@@ -1,4 +1,3 @@
-phttpx
+httpx
 python-telegram-bot
 playwright
-# Adicione outros se usar: aiofiles, beautifulsoup4, etc.
