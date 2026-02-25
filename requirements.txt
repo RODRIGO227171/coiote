@@ -1,1 +1,4 @@
-python-telegram-bot==20.8
+phttpx
+python-telegram-bot
+playwright
+# Adicione outros se usar: aiofiles, beautifulsoup4, etc.
