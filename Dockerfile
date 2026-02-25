@@ -16,5 +16,5 @@ COPY . .
 
 # Comando para iniciar o bot - AJUSTE O NOME DO ARQUIVO AQUI!
 # Se seu script se chama gate_deep_js_server.py, use isso:
-CMD ["python", "gate_deep_js_server.py"]
+CMD ["python", "app.py"]
 # Se for app.py (como no log), use: CMD ["python", "app.py"]]
