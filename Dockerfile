@@ -1,20 +1,21 @@
-# Imagem oficial com Python 3.11 + Playwright + Chromium headless já instalados
-# Isso resolve a maioria dos problemas com playwright em containers
+# Use uma imagem base Debian com Python e Playwright pré-configurada
 FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
-# Define o diretório de trabalho dentro do container
+# Define diretório de trabalho
 WORKDIR /app
 
-# Copia requirements.txt primeiro (para cache de layers no build)
+# Copia requirements primeiro (para cache)
 COPY requirements.txt .
 
-# Instala as dependências Python
-RUN pip install --no-cache-dir -r requirements.txt
+# Atualiza pip e instala dependências Python
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copia todo o código do projeto (incluindo seu .py principal)
+# Instala os browsers do Playwright explicitamente (essencial!)
+RUN playwright install --with-deps chromium
+
+# Copia o código do bot
 COPY . .
 
-# Comando para iniciar o bot - AJUSTE O NOME DO ARQUIVO AQUI!
-# Se seu script se chama gate_deep_js_server.py, use isso:
+# Comando para rodar o bot (ajuste o nome do arquivo se necessário)
 CMD ["python", "app.py"]
-# Se for app.py (como no log), use: CMD ["python", "app.py"]]
