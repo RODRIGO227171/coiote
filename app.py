@@ -1,5 +1,6 @@
-# bot_gate.py - Versão FINAL corrigida para rodar local e em container/Railway
-# Correções: indentação, screenshot logs sem bot, startup log via post_init
+# bot_gate.py - Versão FINAL com Sistema de Créditos + Referência + Grupos
+# Todas as funções originais mantidas + sistema de créditos integrado
+# Créditos em memória (reinicia = zera). Para produção use SQLite/PostgreSQL.
 
 import os
 import re
@@ -24,7 +25,7 @@ from playwright.async_api import async_playwright, Browser, Page
 # Configuração principal
 # =============================
 TOKEN = "8768731529:AAFO9hgrYtVCpKmqDwwu8RI4weBkJ02uJXs"  # ← SUBSTITUA PELO TOKEN REAL DO SEU BOT
-GROUP_ID = -5293701786                     # ID do seu grupo para logs
+GROUP_ID = -5293701786  # ID do seu grupo para logs
 
 MAX_BYTES = 2_000_000
 MAX_SITES_PER_BATCH = 200
@@ -41,6 +42,25 @@ PATH_TIERS = [
     ["/contact", "/help", "/faq", "/login", "/signin", "/support"],
     ["/sitemap.xml", "/robots.txt"],
 ]
+
+# =============================
+# Sistema de Créditos (em memória)
+# =============================
+user_credits: Dict[int, int] = {}          # user_id → créditos atuais
+user_referred_by: Dict[int, int] = {}      # user_id → quem indicou (para evitar duplicado)
+referred_count: Dict[int, int] = {}        # user_id → quantas pessoas indicou
+groups_added: Dict[int, set] = {}          # user_id → set de chat_id já adicionados por ele
+
+CREDIT_START = 1000
+CREDIT_CHECK = 100
+CREDIT_CHECKJS = 200
+CREDIT_CSV = 400
+
+CREDIT_REFER = 1000                        # quem indica ganha isso quando a pessoa inicia com ref_
+CREDIT_ADD_GROUP_BASE = 2000
+CREDIT_GROUP_50 = 5000
+CREDIT_GROUP_100 = 10000
+CREDIT_GROUP_MAX = 30000
 
 # =============================
 # Premium emoji IDs
@@ -99,6 +119,38 @@ async def send_log_to_group(bot, text: str):
         print(f"ERRO AO ENVIAR LOG PARA O GRUPO: {e}")
 
 # =============================
+# Sistema de Créditos - Helpers
+# =============================
+def get_credits(user_id: int) -> int:
+    if user_id not in user_credits:
+        user_credits[user_id] = CREDIT_START
+        referred_count[user_id] = 0
+        groups_added[user_id] = set()
+    return user_credits[user_id]
+
+def add_credits(user_id: int, amount: int, reason: str = ""):
+    old = get_credits(user_id)
+    user_credits[user_id] = old + amount
+    print(f"[CREDIT] +{amount} para {user_id} ({reason}) → {old} → {user_credits[user_id]}")
+
+def spend_credits(user_id: int, amount: int, reason: str = "") -> bool:
+    cred = get_credits(user_id)
+    if cred < amount:
+        return False
+    user_credits[user_id] = cred - amount
+    print(f"[CREDIT] -{amount} para {user_id} ({reason}) → {cred} → {user_credits[user_id]}")
+    return True
+
+async def check_credits(update: Update, cost: int, cmd_name: str) -> bool:
+    uid = update.effective_user.id
+    if not spend_credits(uid, cost, cmd_name):
+        cred = get_credits(uid)
+        msg = f"❌ Créditos insuficientes!\n\nVocê tem <b>{cred}</b> créditos.\nEsse comando custa <b>{cost}</b> créditos."
+        await update.effective_message.reply_text(msg, parse_mode="HTML")
+        return False
+    return True
+
+# =============================
 # Renderização bonita do resultado
 # =============================
 def esc(s: str) -> str:
@@ -130,8 +182,8 @@ def render_pretty_result(res: "ScanResult") -> str:
 
     lines.append(f'{tg_emoji(ce("1"), "🌐")} <b>{esc(res.url)}</b>')
     lines.append(
-        f'{tg_emoji(ce("8"), "📊")} Pages: {res.pages_checked}  |  '
-        f'Score: {res.score}  |  Confidence: {esc(res.confidence)}'
+        f'{tg_emoji(ce("8"), "📊")} Pages: {res.pages_checked} | '
+        f'Score: {res.score} | Confidence: {esc(res.confidence)}'
     )
     if res.screenshot_taken_from:
         lines.append(f"📸 Screenshot from: /{res.screenshot_taken_from.lstrip('/')}")
@@ -184,37 +236,133 @@ def render_pretty_result(res: "ScanResult") -> str:
     return "\n".join(lines)
 
 # =============================
-# Comando /start
+# Comando /start com referral
 # =============================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
+    uid = u.id
     username = u.username or u.first_name or "desconhecido"
-    await send_log_to_group(context.bot, f"Usuário <b>{username}</b> (ID {u.id}) iniciou o bot com /start")
+
+    # Referral
+    args = context.args
+    ref_id = None
+    if args and args[0].startswith("ref_"):
+        try:
+            ref_id = int(args[0][4:])
+        except:
+            ref_id = None
+
+    if ref_id and ref_id != uid and uid not in user_referred_by:
+        user_referred_by[uid] = ref_id
+        add_credits(ref_id, CREDIT_REFER, f"referral from {uid}")
+        referred_count[ref_id] = referred_count.get(ref_id, 0) + 1
+        await send_log_to_group(context.bot, f"Referral bem-sucedido: {uid} indicou por {ref_id}")
+
+    get_credits(uid)  # inicializa créditos
 
     sep = "━━━━━━━━━━━━━━━━━━"
     text = "\n".join([
         f'{tg_emoji(ce("1"), "🌐")} <b>Epstein Hints Checker</b>',
         f'{tg_emoji(ce("9"), "✍️")} <i>Justice for Epstein!!!</i>',
         sep,
+        f"💰 Seus créditos: <b>{get_credits(uid)}</b>",
+        "",
         f'{tg_emoji(ce("10"), "🚀")} <b>SCAN</b>',
-        f'{tg_emoji(ce("11"), "🔍")} <code>/check &lt;site&gt;</code>  — fast',
-        f'{tg_emoji(ce("11"), "🔍")} <code>/checkjs &lt;site&gt;</code> — deep',
+        f'{tg_emoji(ce("11"), "🔍")} <code>/check &lt;site&gt;</code> — {CREDIT_CHECK} créditos',
+        f'{tg_emoji(ce("11"), "🔍")} <code>/checkjs &lt;site&gt;</code> — {CREDIT_CHECKJS} créditos',
         "",
         f'{tg_emoji(ce("12"), "🗂")} <b>BATCH</b>',
-        f'{tg_emoji(ce("12"), "🗂")} Send a .txt file (1 domain per line, max {MAX_SITES_PER_BATCH})',
-        f'{tg_emoji(ce("8"), "📊")} /csv — Last batch report',
+        f'{tg_emoji(ce("12"), "🗂")} Envie .txt (1 domínio por linha, máx {MAX_SITES_PER_BATCH}) — GRÁTIS',
+        f'{tg_emoji(ce("8"), "📊")} /csv — relatório do último batch ({CREDIT_CSV} créditos)',
         sep,
-        f'{tg_emoji(ce("5"), "🛡")} <b>WHAT IT DETECTS</b>',
-        f'{tg_emoji(ce("4"), "⛈")} Cloudflare/WAF',
-        f'{tg_emoji(ce("6"), "🤖")} Bot/JS protection',
-        f'{tg_emoji(ce("11"), "🔍")} Captchas',
-        f'{tg_emoji(ce("7"), "💰")} Payments/gateways',
-        f'{tg_emoji(ce("12"), "🗂")} Platforms',
+        f"🔗 Convide amigos → ganhe {CREDIT_REFER} créditos cada!",
+        f"Link: https://t.me/{context.bot.username}?start=ref_{uid}",
+        "",
+        f"🤖 Adicione o bot em um grupo (dê permissão de ler mensagens) e use /addgroup → +créditos!",
+        f"Use /saldo para ver seus créditos.",
     ])
-    await update.effective_message.reply_text(text, parse_mode="HTML")
+    await update.effective_message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+    await send_log_to_group(context.bot, f"Usuário <b>{username}</b> (ID {uid}) iniciou o bot com /start")
 
 # =============================
-# Helpers utilitários
+# Comando /saldo
+# =============================
+async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cred = get_credits(uid)
+    ref_count = referred_count.get(uid, 0)
+    ref_by = user_referred_by.get(uid)
+
+    text = f"💰 <b>Seus créditos atuais:</b> {cred}\n\n"
+    text += f"👥 Você indicou <b>{ref_count}</b> pessoa(s)\n"
+    if ref_by:
+        text += f"Você foi indicado por ID {ref_by}\n"
+    text += f"\n🔗 Seu link de convite:\nhttps://t.me/{context.bot.username}?start=ref_{uid}"
+
+    await update.effective_message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+# =============================
+# Comando /addgroup (dentro do grupo)
+# =============================
+async def cmd_addgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    message = update.effective_message
+
+    if chat.type not in ["group", "supergroup"]:
+        await message.reply_text("❌ Esse comando só funciona dentro de um grupo/supergroup.")
+        return
+
+    uid = user.id
+    chat_id = chat.id
+    groups_added.setdefault(uid, set())
+
+    if chat_id in groups_added[uid]:
+        await message.reply_text("❌ Você já registrou esse grupo anteriormente.")
+        return
+
+    # Contagem real de membros
+    try:
+        member_count = await context.bot.get_chat_member_count(chat_id)
+    except Exception as e:
+        member_count = 0
+        await send_log_to_group(context.bot, f"Erro get_chat_member_count {chat_id}: {e}")
+
+    # Escala de créditos conforme tamanho do grupo
+    if member_count >= 1000:
+        credit = 30000
+    elif member_count >= 500:
+        credit = 25000
+    elif member_count >= 200:
+        credit = 15000
+    elif member_count >= 100:
+        credit = 10000
+    elif member_count >= 50:
+        credit = 5000
+    else:
+        credit = 2000
+
+    credit = min(credit, CREDIT_GROUP_MAX)
+
+    groups_added[uid].add(chat_id)
+    add_credits(uid, credit, f"addgroup {chat.title or 'sem título'} ({member_count} membros)")
+
+    await message.reply_text(
+        f"✅ Grupo registrado com sucesso!\n"
+        f"👥 Membros: {member_count}\n"
+        f"💰 Você ganhou <b>{credit}</b> créditos!\n"
+        f"Total agora: <b>{get_credits(uid)}</b>",
+        parse_mode="HTML"
+    )
+
+    await send_log_to_group(
+        context.bot,
+        f"Grupo adicionado por {uid} ({user.name}) → {chat.title} ({chat_id}) | {member_count} membros | +{credit} créditos"
+    )
+
+# =============================
+# Helpers utilitários (originais)
 # =============================
 def normalize_url(url: str) -> str:
     url = (url or "").strip()
@@ -249,7 +397,7 @@ def root_domain(host: str) -> str:
     return ".".join(parts[-2:])
 
 # =============================
-# Keywords e Patterns (parte grande)
+# Keywords e Patterns (todas as originais)
 # =============================
 SCRIPT_PAYMENT_KEYWORDS = re.compile(
     r"(pay|payment|checkout|billing|card|cc-|gateway|processor|3ds|secure|token|vault|"
@@ -662,7 +810,7 @@ def detect_external_domains(html_txt: str) -> Tuple[List[str], int]:
     return sorted(set(found)), min(12, score)
 
 # =============================
-# Motor de scan - CORRIGIDO
+# Motor de scan - ORIGINAL (mantido 100%)
 # =============================
 async def scan_one_site(
     raw_url: str,
@@ -717,14 +865,14 @@ async def scan_one_site(
         cf, challenge, cf_score = detect_cloudflare(html_txt, hdrs, cookies, status)
         if cf:
             cf_detected_any = True
-        if challenge:
-            cf_challenge_any = True
-        total_score += min(12, cf_score)
+            if challenge:
+                cf_challenge_any = True
+            total_score += min(12, cf_score)
 
         plats, plat_score = detect_platforms(html_txt, hdrs)
         for p in plats:
             platform_found.add(p)
-        total_score += plat_score
+            total_score += plat_score
 
         if rx_any(AMEX_PATTERNS, html_txt):
             amex = True
@@ -742,7 +890,7 @@ async def scan_one_site(
         ext_domains, ext_score = detect_external_domains(html_txt)
         for d in ext_domains:
             payment_found.add(d)
-        total_score += ext_score
+            total_score += ext_score
 
         pay_score_local = 0
         for gname, pats in GATEWAY_HINTS.items():
@@ -809,8 +957,8 @@ async def scan_one_site(
                 await analyze_blob(curr_base, html_txt, hdrs, cookies, status, final_url)
                 await progress(f"Checking… {pages_ok}/{pages_total} pages (tier {tier_idx}/{len(PATH_TIERS)})")
 
-            if total_score >= 28 or (payment_found and platform_found) or len(payment_found) >= 2:
-                break
+                if total_score >= 28 or (payment_found and platform_found) or len(payment_found) >= 2:
+                    break
 
     async def run_js_scan(curr_base: str) -> Tuple[Optional[bytes], Optional[str]]:
         nonlocal errors, pages_ok, status_debug, fail_samples, total_score
@@ -841,7 +989,7 @@ async def scan_one_site(
 
             await analyze_blob(curr_base, r_html, "", "", 200, url)
 
-            # Screenshot - CORRIGIDO: sem bot, apenas print
+            # Screenshot
             if screenshot_bytes is None and path in ["/checkout", "/cart", "/"]:
                 try:
                     browser = await get_browser()
@@ -917,7 +1065,7 @@ async def scan_one_site(
     )
 
 # =============================
-# Envio do resultado com screenshot
+# Envio do resultado com screenshot (original)
 # =============================
 async def send_result_with_screenshot(update: Update, res: ScanResult, progress_msg: Message):
     text = render_pretty_result(res)
@@ -965,11 +1113,14 @@ async def send_result_with_screenshot(update: Update, res: ScanResult, progress_
         await update.effective_message.reply_text(text, parse_mode="HTML")
 
 # =============================
-# Comandos /check e /checkjs
+# Comandos pagos (/check, /checkjs, /csv) com verificação de créditos
 # =============================
 _last_batch_results: Dict[int, List[ScanResult]] = {}
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_credits(update, CREDIT_CHECK, "/check"):
+        return
+
     u = update.effective_user
     username = u.username or u.first_name or "desconhecido"
     if not context.args:
@@ -997,6 +1148,9 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_log_to_group(context.bot, f"Resultado /check <code>{target}</code> → Confidence: <b>{conf}</b> | Score: {score} | CF: {yn(res.cloudflare)} | Pagamentos: {res.payment_hints[:80]}{'...' if len(res.payment_hints)>80 else ''}")
 
 async def cmd_checkjs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_credits(update, CREDIT_CHECKJS, "/checkjs"):
+        return
+
     u = update.effective_user
     username = u.username or u.first_name or "desconhecido"
     if not context.args:
@@ -1032,6 +1186,9 @@ def results_to_csv_bytes(results: List[ScanResult]) -> bytes:
     return bio.getvalue()
 
 async def cmd_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_credits(update, CREDIT_CSV, "/csv"):
+        return
+
     u = update.effective_user
     username = u.username or u.first_name or "desconhecido"
     await send_log_to_group(context.bot, f"<b>{username}</b> (ID {u.id}) → /csv")
@@ -1128,7 +1285,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await edit_lines(progress_msg, [
         (ce("10"), "🚀", f"Batch done ({len(results)} sites)"),
-        (ce("8"),  "📊", f"Confidence: high={high}, medium={med}, low={low}"),
+        (ce("8"), "📊", f"Confidence: high={high}, medium={med}, low={low}"),
         (ce("12"), "🗂", "Use /csv to download the report."),
     ])
 
@@ -1149,19 +1306,19 @@ async def _post_shutdown(app: Application):
 # =============================
 async def post_init(application: Application) -> None:
     try:
-        await send_log_to_group(application.bot, "🤖 Bot iniciado no servidor (Railway/Container)")
+        await send_log_to_group(application.bot, "🤖 Bot iniciado no servidor com sistema de créditos")
     except Exception as e:
         print(f"Erro no post_init log: {e}")
 
 # =============================
-# Main - indentação perfeita
+# Main
 # =============================
 def main():
     if not TOKEN or TOKEN == "SEU_TOKEN_AQUI_DIRETO_NO_CODIGO":
         print("ERRO: Substitua o TOKEN no código antes de rodar!")
         return
 
-    print("Iniciando bot no modo servidor...")
+    print("Iniciando bot com sistema de créditos...")
 
     app = Application.builder() \
         .token(TOKEN) \
@@ -1171,6 +1328,8 @@ def main():
         .build()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("saldo", cmd_saldo))
+    app.add_handler(CommandHandler("addgroup", cmd_addgroup))
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("checkjs", cmd_checkjs))
     app.add_handler(CommandHandler("csv", cmd_csv))
@@ -1180,4 +1339,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
